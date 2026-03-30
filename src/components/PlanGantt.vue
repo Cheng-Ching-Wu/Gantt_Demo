@@ -413,6 +413,8 @@ export default {
                     bar.className = 'custom-act-bar'
                     if (isLeftClipped)  bar.classList.add('bar-left-clipped')
                     if (isRightClipped) bar.classList.add('bar-right-clipped')
+                    const tl = isLeftClipped  ? '0' : '2px'
+                    const tr = isRightClipped ? '0' : '2px'
                     bar.style.cssText = `
                         position:absolute;
                         left:${left}px;
@@ -421,11 +423,15 @@ export default {
                         height:${barHeight}px;
                         background:${typeColor};
                         border:2px solid ${typeBorder};
-                        border-radius:2px;
+                        ${isLeftClipped  ? 'border-left:none;'  : ''}
+                        ${isRightClipped ? 'border-right:none;' : ''}
+                        border-radius:${tl} ${tr} ${tr} ${tl};
+                        color:${typeBorder};
                         display:flex;
                         align-items:center;
                         justify-content:center;
-                        font-size:11px;
+                        font-size:1.15em;
+                        font-weight: 900;
                         overflow:visible;
                         white-space:nowrap;
                         box-sizing:border-box;
@@ -440,8 +446,38 @@ export default {
 
                     const labelEl = document.createElement('span')
                     labelEl.textContent = act.label
-                    labelEl.style.cssText = 'pointer-events:none; overflow:hidden; white-space:nowrap;'
+                    labelEl.style.cssText = 'pointer-events:none; overflow:hidden; white-space:nowrap; font-weight:900;'
                     bar.appendChild(labelEl)
+
+                    // 跨週箭頭指示器（置於 bar 內側邊緣，避免被 gantt_data_area overflow:hidden 裁掉）
+                    if (isLeftClipped) {
+                        const arrow = document.createElement('div')
+                        arrow.style.cssText = `
+                            position:absolute; left:3px; top:50%;
+                            transform:translateY(-50%);
+                            width:0; height:0;
+                            border-top:7px solid transparent;
+                            border-bottom:7px solid transparent;
+                            border-right:9px solid ${typeBorder};
+                            pointer-events:none;
+                            z-index:6;
+                        `
+                        bar.appendChild(arrow)
+                    }
+                    if (isRightClipped) {
+                        const arrow = document.createElement('div')
+                        arrow.style.cssText = `
+                            position:absolute; right:3px; top:50%;
+                            transform:translateY(-50%);
+                            width:0; height:0;
+                            border-top:7px solid transparent;
+                            border-bottom:7px solid transparent;
+                            border-left:9px solid ${typeBorder};
+                            pointer-events:none;
+                            z-index:6;
+                        `
+                        bar.appendChild(arrow)
+                    }
 
                     // 左側縮放把手（裁切側不加，防止資料錯誤）
                     const lHandle = document.createElement('div')
@@ -513,7 +549,7 @@ export default {
                                     display:flex;
                                     align-items:center;
                                     justify-content:center;
-                                    font-size:11px;
+                                    font-size: 1.15em;
                                     opacity:0.5;
                                     pointer-events:none;
                                     z-index:4;
@@ -945,40 +981,18 @@ export default {
 
 .gantt_task_cell.day-start {
     border-left: 1px solid #888 !important;
+}
 
-/* 跨週裁切指示器 */
+/* 跨週裁切指示器（左/右邊框移除，讓箭頭 DOM 元素貼齊邊緣） */
 .custom-act-bar.bar-left-clipped {
     border-left: none;
     border-top-left-radius: 0;
     border-bottom-left-radius: 0;
-    &::before {
-        content: '';
-        position: absolute;
-        left: 0; top: 50%;
-        transform: translateY(-50%);
-        border-top: 6px solid transparent;
-        border-bottom: 6px solid transparent;
-        border-right: 7px solid currentColor;
-        opacity: 0.7;
-        pointer-events: none;
-    }
 }
 
 .custom-act-bar.bar-right-clipped {
     border-right: none;
     border-top-right-radius: 0;
     border-bottom-right-radius: 0;
-    &::after {
-        content: '';
-        position: absolute;
-        right: 0; top: 50%;
-        transform: translateY(-50%);
-        border-top: 6px solid transparent;
-        border-bottom: 6px solid transparent;
-        border-left: 7px solid currentColor;
-        opacity: 0.7;
-        pointer-events: none;
-    }
-}
 }
 </style>
