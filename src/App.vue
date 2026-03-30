@@ -28,7 +28,7 @@ export default {
     return {
       isCollapsed: false,
       navItems: [
-        { name: 'PlanGantt', label: 'Plan Gantt', path: '/' },
+        { name: 'PlanGantt', label: 'Plan Gantt', path: '/', exact: true },
         { name: 'FrappeGantt', label: 'Frappe Gantt', path: '/FrappeGantt' },
         { name: 'DhtmlxGantt', label: 'Dhtmlx Gantt', path: '/DhtmlxGantt' },
       ]
