@@ -1,0 +1,984 @@
+<template>
+    <div class="plan-gantt-wrapper">
+        <div class="plan-gantt-legend">
+            <div v-for="item in legendData" :key="item.key" class="legend-item">
+                <div 
+                    class="legend-swatch"
+                    :style="{ 
+                        background: item.color,
+                        borderColor: item.border
+                    }"
+                ></div>
+                <span class="legend-label">{{ item.label }}</span>
+            </div>
+        </div>
+        <div class="plan-gantt-nav">
+            <span style="font-size: 0.875em; align-self: end;">單位時間: 30 分鐘</span>
+            <div class="nav-spacer"></div>
+            <a role="button" class="nav-btn" @click="prevWeek">&#8249;</a>
+            <span class="nav-label">{{ weekLabel }}</span>
+            <a role="button" class="nav-btn" @click="nextWeek">&#8250;</a>
+            <div class="nav-spacer"></div>
+            <a role="button" class="nav-btn today-btn" @click="goToday">今天</a>
+        </div>
+        <div class="plan-gantt">
+            <div ref="ganttEl" style="width:100%;"></div>
+        </div>
+    </div>
+</template>
+
+<script>
+import { gantt } from 'dhtmlx-gantt'
+import 'dhtmlx-gantt/codebase/dhtmlxgantt.css'
+
+// 船隻群組（vessel label overlay 用）
+const VESSELS = [
+    { name: '油駁船1', ids: ['s1_bunkering','s1_transfer','s1_maintenance','s1_breakdown','s1_other'] },
+    { name: '油駁船2', ids: ['s2_bunkering','s2_transfer','s2_maintenance','s2_breakdown','s2_other'] },
+    { name: '工作船3', ids: ['s3_transport','s3_patrol','s3_maintenance','s3_breakdown','s3_other'] },
+]
+
+// 每列實際要畫的 task bars（同列可多個）
+const d = (mo, day, h = 0) => new Date(2025, mo - 1, day, h, 0)
+
+const ACTIVITIES = {
+    s1_bunkering: [
+        // 跨週（左側）：起點在本週前，終點進入本週
+        { label: 'X', start: d(9,28,12), end: d(9,29,12)  },
+        { label: 'J', start: d(9,30,6),  end: d(9,30,18)  },
+        { label: 'K', start: d(10,2,6),  end: d(10,2,18)  },
+        // 跨週（右側）：起點在本週內，終點超出本週
+        { label: 'Y', start: d(10,5,12), end: d(10,6,12)  },
+    ],
+    s1_transfer: [
+        { label: 'J', start: d(10,1,0),  end: d(10,2,6)   },
+        { label: 'K', start: d(10,3,0),  end: d(10,4,6)   },
+    ],
+    s2_bunkering: [
+        { label: 'A', start: d(9,30,0),  end: d(9,30,12)  },
+        { label: 'B', start: d(9,30,0),  end: d(9,30,12)  },
+        { label: 'C', start: d(9,30,0),  end: d(9,30,12)  },
+        { label: 'D', start: d(10,2,6),  end: d(10,2,18)  },
+        { label: 'L', start: d(10,2,6),  end: d(10,2,18)  },
+        { label: 'H', start: d(10,2,6),  end: d(10,2,18)  },
+    ],
+    s2_transfer: [
+        // 跨週（左側）
+        { label: 'W', start: d(9,28,18), end: d(9,29,6)   },
+        { label: 'A', start: d(10,1,0),  end: d(10,1,6)   },
+        { label: 'C', start: d(10,1,6),  end: d(10,1,12)  },
+        { label: 'B', start: d(10,1,12), end: d(10,2,0)   },
+        { label: 'H', start: d(10,3,6),  end: d(10,3,18)  },
+        { label: 'L', start: d(10,4,6),  end: d(10,5,0)   },
+        // 跨週（右側）
+        { label: 'Z', start: d(10,5,18), end: d(10,6,18)  },
+    ],
+    s3_patrol: [
+        { label: 'J', start: d(10,1,0),  end: d(10,1,18)  },
+        { label: 'K', start: d(10,3,0),  end: d(10,4,6)   },
+        { label: 'L', start: d(10,4,6),  end: d(10,5,0)   },
+    ],
+}
+
+/**
+ * 對同一列的 activities 計算不重疊分道（greedy interval scheduling），
+ * 並將結果寫入每個 act._lane。
+ * 回傳 totalLanes。
+ */
+/**
+ * 對同一列的 activities 計算不重疊分道，結果寫入 act._lane。
+ *
+ * draggedAct 為 null（初始化或跨列）：完整從頭按起始時間 greedy 分配。
+ * draggedAct 有值（同列拖曳/縮放）：
+ *   Step 1 — 只重新指定 draggedAct 的 lane（其他 bar _lane 完全不變）。
+ *   Step 2 — compact pass：非拖曳 bar 由低 lane 往高 lane 掃，
+ *             若能移到更低 lane（無衝突）則向下收合，滿足「無重疊即合併」要求。
+ */
+function assignLanes(acts, draggedAct = null) {
+    if (!acts.length) return 1
+
+    if (draggedAct) {
+        // Step 1：只算 draggedAct 的最低可用 lane
+        const s = draggedAct.start.getTime()
+        const e = draggedAct.end.getTime()
+        let lane = 0
+        while (acts.some(o => o !== draggedAct &&
+            (o._lane ?? 0) === lane &&
+            s < o.end.getTime() && o.start.getTime() < e)) lane++
+        draggedAct._lane = lane
+
+        // Step 2：compact pass（非拖曳 bar 只往下移，不往上）
+        // 由低 lane 到高 lane 依序嘗試，確保空出的位置能被後面的 bar 填上
+        acts
+            .filter(a => a !== draggedAct && (a._lane ?? 0) > 0)
+            .sort((a, b) => (a._lane ?? 0) - (b._lane ?? 0))
+            .forEach(act => {
+                const as = act.start.getTime(), ae = act.end.getTime()
+                for (let l = 0; l < (act._lane ?? 0); l++) {
+                    const blocked = acts.some(o =>
+                        o !== act && (o._lane ?? 0) === l &&
+                        as < o.end.getTime() && o.start.getTime() < ae)
+                    if (!blocked) { act._lane = l; break }
+                }
+            })
+    } else {
+        // 完整重算（初始化或跨列後）
+        const byStart = [...acts].sort((a, b) => a.start.getTime() - b.start.getTime())
+        const segs = [] // segs[lane] = [{ start, end }, ...]
+        byStart.forEach(act => {
+            let assigned = -1
+            for (let l = 0; l < segs.length; l++) {
+                const s = act.start.getTime(), e = act.end.getTime()
+                if (segs[l].every(seg => s >= seg.end || e <= seg.start)) { assigned = l; break }
+            }
+            if (assigned === -1) { assigned = segs.length; segs.push([]) }
+            segs[assigned].push({ start: act.start.getTime(), end: act.end.getTime() })
+            act._lane = assigned
+        })
+    }
+
+    return Math.max(...acts.map(a => a._lane ?? 0), 0) + 1
+}
+
+// 初始化時對所有列執行一次分道
+Object.values(ACTIVITIES).forEach(acts => assignLanes(acts))
+
+export default {
+    name: 'PlanGantt',
+    data() {
+        return {
+            currentWeekStart: null,
+            legendData: [
+                { key: 'bunkering', label: '補油', color: 'rgba(0,155,255,0.30)', border: '#009bff' },
+                { key: 'transfer', label: '駁油', color: 'rgba(178,71,255,0.30)', border: '#b247ff' },
+                { key: 'maintenance', label: '維修', color: 'rgba(230,140,0,0.30)', border: '#e68c00' },
+                { key: 'breakdown', label: '故障', color: 'rgba(185,0,18,0.30)', border: '#b90012' },
+                { key: 'other', label: '其他', color: 'rgba(213,213,213,0.50)', border: '#d0d0d0' },
+                { key: 'transport', label: '載運', color: 'rgba(0,170,180,0.30)', border: '#00aab4' },
+                { key: 'patrol', label: '警戒', color: 'rgba(255,0,26,0.30)', border: '#ff001a' },
+            ]
+        }
+    },
+    created() {
+        // 從 legendData 產生 TYPE_COLORS（保持全域引用）
+        window.TYPE_COLORS = {}
+        this.legendData.forEach(item => {
+            window.TYPE_COLORS[item.key] = { color: item.color, border: item.border }
+        })
+    },
+    mounted() {
+        gantt.config.columns = [
+            { name: 'text', label: '項目', width: 112, align: 'center' },
+        ]
+
+        const DOW = ['日', '一', '二', '三', '四', '五', '六']
+        gantt.config.scales = [
+            {
+                unit: 'day', step: 1,
+                format: date => `${date.getFullYear()}/${String(date.getMonth()+1).padStart(2,'0')}/${String(date.getDate()).padStart(2,'0')} (${DOW[date.getDay()]})`
+            },
+            {
+                unit: 'hour', step: 6, height: 40,
+                format: date => {
+                    const pad = n => String(n).padStart(2, '0')
+                    const h1  = pad(date.getHours())
+                    const end = new Date(date.getTime() + 6 * 60 * 60 * 1000)
+                    const h2  = pad(end.getHours())
+                    return `<div style="line-height:1.2">${h1}:00<br>${h2}:00</div>`
+                }
+            }
+        ]
+        // 計算本週範圍（週一為起點，週日之後 00:00 為終點）
+        const refDate = new Date(2025, 8, 30)
+        const dow = refDate.getDay()
+        const daysToMon = dow === 0 ? 6 : dow - 1
+        const initStart = new Date(refDate)
+        initStart.setDate(refDate.getDate() - daysToMon)
+        initStart.setHours(0, 0, 0, 0)
+        this.currentWeekStart = initStart
+
+        gantt.config.start_date = this.currentWeekStart
+        gantt.config.end_date   = new Date(this.currentWeekStart.getTime() + 7 * 86400000)
+        gantt.config.show_progress = false
+        gantt.config.readonly      = true   // 避免 gantt 內建 drag 干擾自訂邏輯
+        gantt.config.drag_links    = false
+        gantt.config.drag_progress = false
+        gantt.config.column_width  = 60
+        gantt.config.scale_height  = 70
+        gantt.config.autosize      = 'y'
+
+        // 每列基礎高度（區塊保持此高度，列高依分道數倍增）
+        const BASE_ROW_H = gantt.config.row_height || 35
+
+    // 根據目前 ACTIVITIES 重新計算各 task 的 row_height
+        const updateRowHeights = () => {
+            Object.keys(ACTIVITIES).forEach(taskId => {
+                try {
+                    const task = gantt.getTask(taskId)
+                    const acts = ACTIVITIES[taskId] || []
+                    const totalLanes = acts.length
+                        ? Math.max(...acts.map(a => (a._lane ?? 0)), 0) + 1
+                        : 1
+                    task.row_height = totalLanes * BASE_ROW_H
+                } catch (e) { /* task 尚未存在時忽略 */ }
+            })
+        }
+
+        // 依畫面上的 y 座標找出所在資料列索引（含動態 row_height）
+        const getTaskIndexAtY = y => {
+            for (let i = 0; i < gantt.getTaskCount(); i++) {
+                const top = gantt.getRowTop(i)
+                const t = gantt.getTaskByIndex(i)
+                const h = (t && t.row_height) || gantt.config.row_height
+                if (y >= top && y < top + h) return i
+            }
+            return -1
+        }
+
+        // 隱藏所有原生 task bar
+        gantt.templates.task_class = () => 'hidden-bar'
+        gantt.templates.task_text  = () => ''
+
+        // 每天分隔線加粗
+        gantt.templates.timeline_cell_class = (_t, date) =>
+            date.getHours() === 0 ? 'day-start' : ''
+
+        // 格式化時間為 MM/DD HH:mm（提升到 mounted 層級供 hover tooltip 共用）
+        const fmtDt = dt => {
+            const p = n => String(n).padStart(2, '0')
+            return `${p(dt.getMonth()+1)}/${p(dt.getDate())} ${p(dt.getHours())}:${p(dt.getMinutes())}`
+        }
+
+        // 將 tooltip 限制在視窗內，避免超出螢幕
+        const positionTooltip = (tooltipEl, anchorRect, text) => {
+            const pad = 8
+            tooltipEl.textContent = text
+            tooltipEl.style.transform = 'none'
+            tooltipEl.style.visibility = 'hidden'
+            tooltipEl.style.display = 'block'
+
+            const t = tooltipEl.getBoundingClientRect()
+            let left = anchorRect.left + anchorRect.width / 2 - t.width / 2
+            left = Math.max(pad, Math.min(left, window.innerWidth - t.width - pad))
+
+            let top = anchorRect.top - t.height - pad
+            if (top < pad) top = anchorRect.bottom + pad
+            if (top + t.height > window.innerHeight - pad) {
+                top = Math.max(pad, window.innerHeight - t.height - pad)
+            }
+
+            tooltipEl.style.left = `${Math.round(left)}px`
+            tooltipEl.style.top = `${Math.round(top)}px`
+            tooltipEl.style.visibility = 'visible'
+        }
+
+        // Hover tooltip（單例，掛在 body，bar render 時附加 listener）
+        const hoverTooltip = this._hoverTooltip = document.createElement('div')
+        hoverTooltip.style.cssText = `
+            position:fixed;
+            background:rgba(30,30,30,0.82);
+            color:#fff;
+            font-size: 16px;
+            padding:6px 12px;
+            border-radius:4px;
+            white-space:nowrap;
+            pointer-events:none;
+            z-index:9998;
+            box-shadow:0 2px 6px rgba(0,0,0,0.28);
+            display:none;
+        `
+        document.body.appendChild(hoverTooltip)
+
+        // 記錄目前 focus 的 activity（跨 re-render 保留狀態）
+        let focusedAct = null
+
+        const applyFocusStyle = barEl => {
+            // mousedown / re-render 當下才抓目前的背景，確保還原值永遠是最新的
+            barEl.dataset.savedBg       = barEl.style.backgroundColor || barEl.style.background || ''
+            barEl.style.outline         = '2px solid #1a6fd4'
+            barEl.style.outlineOffset   = '1px'
+            barEl.style.backgroundColor = 'rgba(26,111,212,0.20)'
+            barEl.style.zIndex          = '7'
+            barEl.dataset.focused       = 'true'  // 確保任何路徑呼叫都能被 setFocus 的查詢找到
+        }
+        const removeFocusStyle = barEl => {
+            barEl.style.outline         = ''
+            barEl.style.outlineOffset   = ''
+            barEl.style.backgroundColor = barEl.dataset.savedBg || ''
+            delete barEl.dataset.savedBg
+            delete barEl.dataset.focused
+            barEl.style.zIndex          = '5'
+        }
+        const setFocus = barEl => {
+            document.querySelectorAll('.custom-act-bar[data-focused]').forEach(b => {
+                removeFocusStyle(b)  // removeFocusStyle 內已刪除 data-focused
+            })
+            if (barEl) applyFocusStyle(barEl)  // applyFocusStyle 內已設定 data-focused
+        }
+
+        // ── 在 onGanttRender 手動繪製多 bar + vessel overlay ──
+        gantt.attachEvent('onGanttRender', () => {
+            // ── Vessel label overlay（模擬 rowspan）──
+            document.querySelectorAll('.vessel-label-overlay').forEach(el => el.remove())
+            const gridData = document.querySelector('.gantt_grid_data')
+            if (gridData) {
+                VESSELS.forEach(({ name, ids }) => {
+                    const firstIdx = gantt.getTaskIndex(ids[0])
+                    if (firstIdx === -1) return
+                    const lastIdx = gantt.getTaskIndex(ids[ids.length - 1])
+                    if (lastIdx === -1) return
+
+                    const top = gantt.getRowTop(firstIdx)
+                    const lastTask = gantt.getTaskByIndex(lastIdx)
+                    const lastRowH = (lastTask && lastTask.row_height) || gantt.config.row_height
+                    const height = (gantt.getRowTop(lastIdx) + lastRowH) - top
+
+                    const el = document.createElement('div')
+                    el.className  = 'vessel-label-overlay'
+                    el.textContent = name
+                    Object.assign(el.style, {
+                        position:       'absolute',
+                        left:           '0',
+                        top:            `${top}px`,
+                        width:          '52px',
+                        height:         `${height}px`,
+                        display:        'flex',
+                        alignItems:     'center',
+                        justifyContent: 'center',
+                        writingMode:    'vertical-rl',
+                        fontWeight:     'bold',
+                        fontSize:       '13px',
+                        backgroundColor:'#e8f0f8',
+                        borderRight:    '1px solid #b0c4de',
+                        borderBottom:   '2px solid #7a9abf',
+                        zIndex:         '10',
+                        pointerEvents:  'none',
+                        boxSizing:      'border-box',
+                    })
+                    gridData.appendChild(el)
+                })
+            }
+
+            // ── 手動繪製多 task bar（取代 addTaskLayer）──
+            document.querySelectorAll('.custom-act-bar').forEach(el => el.remove())
+            const dataArea = document.querySelector('.gantt_data_area')
+            if (!dataArea) return
+
+            const timelineStart = gantt.config.start_date.getTime()
+            // 用 gantt.posFromDate 計算實際渲染的 msPerPx，確保與表頭時間完全對齊
+            const _px6h  = gantt.posFromDate(new Date(timelineStart + 6 * 3600000))
+            const msPerPx = 6 * 3600000 / _px6h
+            const SNAP_MS  = 30 * 60 * 1000  // 30 分鐘對齊單位
+            const snapMs   = ms => Math.round(ms / SNAP_MS) * SNAP_MS
+            // Math.round 確保回傳整數 px，避免浮點誤差累積
+            const snapPx   = px => Math.round((snapMs(timelineStart + px * msPerPx) - timelineStart) / msPerPx)
+
+            Object.entries(ACTIVITIES).forEach(([taskId, acts]) => {
+                if (!acts || acts.length === 0) return
+                const idx = gantt.getTaskIndex(taskId)
+                if (idx === -1) return
+                const rowTop = gantt.getRowTop(idx)
+
+                // 依 taskId 後綴取得類型顏色（格式: s1_bunkering → bunkering）
+                const actType = taskId.replace(/^s\d+_/, '')
+                const legendItem = this.legendData.find(item => item.key === actType)
+                const typeColor = legendItem?.color || 'transparent'
+                const typeBorder = legendItem?.border || '#888'
+
+                // 計算重疊分道（區塊保持原高度，列高由 row_height 撐開）
+                // _lane 已在 assignLanes 初始化時寫入，直接讀取即可
+                const barH = BASE_ROW_H - 8
+
+                acts.forEach((act) => {
+                    // 超出本週範圍則跳過不渲染
+                    const weekStartMs = gantt.config.start_date.getTime()
+                    const weekEndMs   = gantt.config.end_date.getTime()
+                    if (act.end.getTime() <= weekStartMs || act.start.getTime() >= weekEndMs) return
+
+                    // 視覺位置裁切至本週範圍（tooltip 仍顯示原始 act.start/end）
+                    const visStart = new Date(Math.max(act.start.getTime(), weekStartMs))
+                    const visEnd   = new Date(Math.min(act.end.getTime(), weekEndMs))
+                    const left  = gantt.posFromDate(visStart)
+                    const width = gantt.posFromDate(visEnd) - left
+
+                    const lane      = act._lane ?? 0
+                    const barTop    = rowTop + 4 + lane * BASE_ROW_H
+                    const barHeight = barH
+
+                    // 偵測跨週裁切
+                    const isLeftClipped  = act.start.getTime() < weekStartMs
+                    const isRightClipped = act.end.getTime()   > weekEndMs
+
+                    const bar = document.createElement('div')
+                    bar.className = 'custom-act-bar'
+                    if (isLeftClipped)  bar.classList.add('bar-left-clipped')
+                    if (isRightClipped) bar.classList.add('bar-right-clipped')
+                    bar.style.cssText = `
+                        position:absolute;
+                        left:${left}px;
+                        width:${Math.max(width, 30)}px;
+                        top:${barTop}px;
+                        height:${barHeight}px;
+                        background:${typeColor};
+                        border:2px solid ${typeBorder};
+                        border-radius:2px;
+                        display:flex;
+                        align-items:center;
+                        justify-content:center;
+                        font-size:11px;
+                        overflow:visible;
+                        white-space:nowrap;
+                        box-sizing:border-box;
+                        cursor:grab;
+                        user-select:none;
+                        z-index:5;
+                        transition:box-shadow 0.12s;
+                    `
+                    // 儲存邊框色，re-render 後若此 act 仍被 focus 就還原樣式
+                    bar.dataset.borderColor = typeBorder
+                    if (act === focusedAct) applyFocusStyle(bar)
+
+                    const labelEl = document.createElement('span')
+                    labelEl.textContent = act.label
+                    labelEl.style.cssText = 'pointer-events:none; overflow:hidden; white-space:nowrap;'
+                    bar.appendChild(labelEl)
+
+                    // 左側縮放把手（裁切側不加，防止資料錯誤）
+                    const lHandle = document.createElement('div')
+                    lHandle.className = 'bar-resize-handle bar-resize-left'
+                    lHandle.style.cssText = `
+                        position:absolute; left:0; top:0; bottom:0;
+                        width:8px; cursor:w-resize; z-index:1;
+                    `
+                    if (!isLeftClipped) bar.appendChild(lHandle)
+
+                    // 右側縮放把手（裁切側不加，防止資料錯誤）
+                    const rHandle = document.createElement('div')
+                    rHandle.className = 'bar-resize-handle bar-resize-right'
+                    rHandle.style.cssText = `
+                        position:absolute; right:0; top:0; bottom:0;
+                        width:8px; cursor:e-resize; z-index:1;
+                    `
+                    if (!isRightClipped) bar.appendChild(rHandle)
+
+                    // ── Hover tooltip ──
+                    bar.addEventListener('mouseenter', () => {
+                        const r = bar.getBoundingClientRect()
+                        positionTooltip(hoverTooltip, r, `${act.label}  ${fmtDt(act.start)} ~ ${fmtDt(act.end)}`)
+                    })
+                    bar.addEventListener('mouseleave', () => {
+                        hoverTooltip.style.display = 'none'
+                    })
+
+                    // 通用拖曳邏輯
+                    const attachDrag = (el, type) => {
+                        el.addEventListener('pointerdown', e => {
+                            e.stopPropagation()
+                            e.preventDefault()
+                            el.setPointerCapture(e.pointerId)
+                            // 設定 focus，同時隱藏 hover tooltip（drag tooltip 接管）
+                            hoverTooltip.style.display = 'none'
+                            focusedAct = act
+                            setFocus(bar)
+
+                            const startX    = e.clientX
+                            const startY    = e.clientY
+                            const startTop  = parseFloat(bar.style.top)
+                            const startLeft = parseFloat(bar.style.left)
+                            const startW    = parseFloat(bar.style.width)
+                            const duration  = act.end.getTime() - act.start.getTime()
+                            const minW      = SNAP_MS / msPerPx
+
+                            // 記錄拖曳前的原始時間
+                            const origStart = new Date(act.start)
+                            const origEnd   = new Date(act.end)
+
+                            // 追蹤目前拖曳位移（用於 tooltip 計算）
+                            let currentDx = 0, currentDy = 0
+
+                            // 建立幽靈 bar（顯示拖曳後的預期位置）
+                            let ghostBar = null
+                            if (type === 'move') {
+                                ghostBar = document.createElement('div')
+                                ghostBar.className = 'custom-act-bar custom-act-bar-ghost'
+                                ghostBar.style.cssText = `
+                                    position:absolute;
+                                    left:${startLeft}px;
+                                    width:${Math.max(parseFloat(bar.style.width), 30)}px;
+                                    top:${startTop}px;
+                                    height:${parseFloat(bar.style.height)}px;
+                                    background:${typeColor};
+                                    border:2px solid ${typeBorder};
+                                    border-radius:2px;
+                                    display:flex;
+                                    align-items:center;
+                                    justify-content:center;
+                                    font-size:11px;
+                                    opacity:0.5;
+                                    pointer-events:none;
+                                    z-index:4;
+                                `
+                                dataArea.appendChild(ghostBar)
+                            }
+
+                            if (type === 'move') bar.style.cursor = 'grabbing'
+
+                            // 建立 tooltip（掛在 body，避免被 dataArea overflow 裁切）
+                            const tooltip = document.createElement('div')
+                            tooltip.className = 'drag-tooltip'
+                            tooltip.style.cssText = `
+                                position:fixed;
+                                background:rgba(30,30,30,0.82);
+                                color:#fff;
+                                font-size:16px;
+                                padding:6px 12px;
+                                border-radius:4px;
+                                white-space:nowrap;
+                                pointer-events:none;
+                                z-index:9999;
+                                box-shadow:0 2px 6px rgba(0,0,0,0.28);
+                            `
+                            document.body.appendChild(tooltip)
+
+                            const updateTooltip = () => {
+                                let curLeft, curW
+                                
+                                if (type === 'move') {
+                                    // 拖曳中 bar 位置不變，使用預期位置計算
+                                    curLeft = snapPx(startLeft + currentDx)
+                                    curW = parseFloat(bar.style.width)
+                                } else {
+                                    // resize 操作直接讀取 bar 當前位置
+                                    curLeft = parseFloat(bar.style.left)
+                                    curW = parseFloat(bar.style.width)
+                                }
+                                
+                                let newStart, newEnd
+
+                                if (type === 'move') {
+                                    const ns = snapMs(timelineStart + curLeft * msPerPx)
+                                    newStart = new Date(ns)
+                                    newEnd   = new Date(ns + duration)
+                                } else if (type === 'resize-right') {
+                                    newStart = origStart
+                                    newEnd   = new Date(snapMs(timelineStart + (curLeft + curW) * msPerPx))
+                                } else if (type === 'resize-left') {
+                                    newStart = new Date(snapMs(timelineStart + curLeft * msPerPx))
+                                    newEnd   = origEnd
+                                }
+
+                                // 使用 bar 的 viewport 座標定位（position:fixed）
+                                const barRect = bar.getBoundingClientRect()
+                                positionTooltip(tooltip, barRect, `${act.label}  ${fmtDt(newStart)} ~ ${fmtDt(newEnd)}`)
+                            }
+
+                            const onMove = ev => {
+                                if (!el.hasPointerCapture(ev.pointerId)) return
+                                const dx = ev.clientX - startX
+                                const dy = ev.clientY - startY
+                                
+                                // 更新當前位移（供 updateTooltip 使用）
+                                currentDx = dx
+                                currentDy = dy
+
+                                if (type === 'move') {
+                                    // 拖曳中原 bar 不改位置，只由幽靈 bar 顯示預期最終位置
+                                    
+                                    // 更新幽靈 bar 位置（顯示預期最終位置）
+                                    if (ghostBar) {
+                                        // 根據滑鼠垂直位移判斷是否要跨列顯示
+                                        const movedY = Math.abs(dy)
+                                        if (movedY >= BASE_ROW_H * 0.5) {
+                                            // 跨列顯示：幽靈 bar 顯示拖到的位置
+                                            ghostBar.style.top = (startTop + dy) + 'px'
+                                        } else {
+                                            // 同列顯示：幽靈 bar 保持在起始 Y
+                                            ghostBar.style.top = startTop + 'px'
+                                        }
+                                        ghostBar.style.left = snapPx(startLeft + dx) + 'px'
+                                    }
+                                } else if (type === 'resize-right') {
+                                    const newRight = snapPx(startLeft + startW + dx)
+                                    bar.style.width = Math.max(newRight - startLeft, minW) + 'px'
+                                } else if (type === 'resize-left') {
+                                    const newLeft = snapPx(startLeft + dx)
+                                    const newW    = Math.max((startLeft + startW) - newLeft, minW)
+                                    bar.style.left  = newLeft + 'px'
+                                    bar.style.width = newW + 'px'
+                                }
+                                updateTooltip()
+                            }
+
+                            updateTooltip()
+
+                            const onUp = ev => {
+                                if (!el.hasPointerCapture(ev.pointerId)) return
+                                el.releasePointerCapture(ev.pointerId)
+                                if (type === 'move') bar.style.cursor = 'grab'
+                                tooltip.remove()
+
+                                // 回寫資料
+                                let finalLeft, finalW
+                                
+                                if (type === 'move') {
+                                    // move 拖曳中 bar 位置未改，使用預期最終位置
+                                    finalLeft = snapPx(startLeft + currentDx)
+                                    finalW = parseFloat(bar.style.width)
+                                } else {
+                                    finalLeft = parseFloat(bar.style.left)
+                                    finalW = parseFloat(bar.style.width)
+                                }
+                                
+                                if (type === 'move') {
+                                    const ns = snapMs(timelineStart + finalLeft * msPerPx)
+                                    act.start = new Date(ns)
+                                    act.end   = new Date(ns + duration)
+
+                                    // 判斷是否跨列（根據滑鼠垂直位移）
+                                    const movedY = Math.abs(currentDy)
+                                    let targetIdx = idx
+
+                                    if (movedY >= BASE_ROW_H * 0.5) {
+                                        // 足夠垂直位移，嘗試跨列
+                                        const tentativeTop = startTop + currentDy
+                                        const centerY = tentativeTop + (BASE_ROW_H - 8) / 2
+                                        targetIdx = getTaskIndexAtY(centerY)
+                                        if (targetIdx === -1) {
+                                            let closestIdx = idx, closestDist = Infinity
+                                            for (let i = 0; i < gantt.getTaskCount(); i++) {
+                                                const dist = Math.abs(gantt.getRowTop(i) - tentativeTop)
+                                                if (dist < closestDist) { closestDist = dist; closestIdx = i }
+                                            }
+                                            targetIdx = closestIdx
+                                        }
+                                    }
+                                    const newTask = gantt.getTaskByIndex(targetIdx)
+
+                    if (newTask && newTask.id !== taskId) {
+                                        // 跨列：移動資料，重新分道兩個受影響的列，更新列高
+                                        const oldArr = ACTIVITIES[taskId]
+                                        if (oldArr) {
+                                            const ai = oldArr.indexOf(act)
+                                            if (ai !== -1) oldArr.splice(ai, 1)
+                                        }
+                                        if (!ACTIVITIES[newTask.id]) ACTIVITIES[newTask.id] = []
+                                        ACTIVITIES[newTask.id].push(act)
+                                        // 重新分道（跨列後兩列的 _lane 都需重算）
+                                        const srcActs = ACTIVITIES[taskId]
+                                        if (srcActs && srcActs.length) assignLanes(srcActs)  // 來源列無 draggedAct（act 已移走）
+                                        assignLanes(ACTIVITIES[newTask.id], act)              // 目標列：act 排最後，其他 bar 優先
+                                    } else {
+                                        // 同列：act 排最後，非拖曳 bar 優先保留位置
+                                        assignLanes(ACTIVITIES[taskId], act)
+                                    }
+                                    updateRowHeights()
+                                    gantt.render()
+                                } else if (type === 'resize-right') {
+                                    act.end = new Date(snapMs(timelineStart + (finalLeft + finalW) * msPerPx))
+                                    assignLanes(ACTIVITIES[taskId], act)
+                                    updateRowHeights()
+                                    gantt.render()
+                                } else if (type === 'resize-left') {
+                                    act.start = new Date(snapMs(timelineStart + finalLeft * msPerPx))
+                                    assignLanes(ACTIVITIES[taskId], act)
+                                    updateRowHeights()
+                                    gantt.render()
+                                }
+
+                                // 刪除幽靈 bar
+                                if (ghostBar && ghostBar.parentNode) {
+                                    ghostBar.parentNode.removeChild(ghostBar)
+                                }
+
+                                el.removeEventListener('pointermove', onMove)
+                                el.removeEventListener('pointerup', onUp)
+                            }
+
+                            el.addEventListener('pointermove', onMove)
+                            el.addEventListener('pointerup', onUp)
+                        })
+                    }
+
+                    attachDrag(bar,     'move')
+                    if (!isLeftClipped)  attachDrag(lHandle, 'resize-left')
+                    if (!isRightClipped) attachDrag(rHandle, 'resize-right')
+
+                    dataArea.appendChild(bar)
+                })
+            })
+        })
+
+        gantt.init(this.$refs.ganttEl)
+        gantt.clearAll()
+
+        const empty = (id, text) => {
+            const acts = ACTIVITIES[id] || []
+            // _lane 已在頂層 assignLanes 初始化時寫入，直接計算 totalLanes
+            const totalLanes = acts.length
+                ? Math.max(...acts.map(a => (a._lane ?? 0)), 0) + 1
+                : 1
+            return {
+                id, text, isEmptyRow: true,
+                start_date: gantt.config.start_date,
+                end_date:   gantt.config.end_date,
+                row_height: totalLanes * BASE_ROW_H,
+            }
+        }
+
+        gantt.parse({
+            data: [
+                // 油駁船1
+                empty('s1_bunkering',   '補油'),
+                empty('s1_transfer',    '駁油'),
+                empty('s1_maintenance', '維修'),
+                empty('s1_breakdown',   '故障'),
+                empty('s1_other',       '其他'),
+                // 油駁船2
+                empty('s2_bunkering',   '補油'),
+                empty('s2_transfer',    '駁油'),
+                empty('s2_maintenance', '維修'),
+                empty('s2_breakdown',   '故障'),
+                empty('s2_other',       '其他'),
+                // 工作船3
+                empty('s3_transport',   '載運'),
+                empty('s3_patrol',      '警戒'),
+                empty('s3_maintenance', '維修'),
+                empty('s3_breakdown',   '故障'),
+                empty('s3_other',       '其他'),
+            ],
+            links: []
+        })
+
+        // parse 後再同步一次列高，確保 grid 與 timeline 都套用到最新 row_height
+        updateRowHeights()
+        gantt.render()
+
+        // ── 拖拉平移時間軸（點擊空白區域才啟動）──
+        let lastX = 0, lastY = 0
+        const container = this.$refs.ganttEl
+
+        container.addEventListener('pointerdown', e => {
+            // 若點擊的是 bar 或縮放把手，不啟動 pan
+            if (e.target.closest('.custom-act-bar')) return
+            // 點擊空白區域，清除 focus
+            focusedAct = null
+            setFocus(null)
+            container.setPointerCapture(e.pointerId)
+            lastX = e.clientX
+            lastY = e.clientY
+            container.style.cursor = 'grabbing'
+            e.preventDefault()
+        }, { capture: true })
+
+        container.addEventListener('pointermove', e => {
+            if (!container.hasPointerCapture(e.pointerId)) return
+            const dx = lastX - e.clientX
+            const dy = lastY - e.clientY
+            lastX = e.clientX
+            lastY = e.clientY
+            const state = gantt.getScrollState()
+            if (state) gantt.scrollTo((state.x || 0) + dx, (state.y || 0) + dy)
+        }, { capture: true })
+
+        container.addEventListener('pointerup', e => {
+            if (!container.hasPointerCapture(e.pointerId)) return
+            container.releasePointerCapture(e.pointerId)
+            container.style.cursor = ''
+        }, { capture: true })
+    },
+    beforeDestroy() {
+        if (this._hoverTooltip?.parentNode) this._hoverTooltip.parentNode.removeChild(this._hoverTooltip)
+    },
+    computed: {
+        weekLabel() {
+            if (!this.currentWeekStart) return ''
+            // ISO 週數計算
+            const d = new Date(this.currentWeekStart)
+            d.setDate(d.getDate() + 3 - (d.getDay() + 6) % 7)
+            const week1 = new Date(d.getFullYear(), 0, 4)
+            const weekNum = 1 + Math.round(((d - week1) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7)
+            return `${this.currentWeekStart.getFullYear()} 年  第 ${weekNum} 週`
+        }
+    },
+    methods: {
+        prevWeek() {
+            const d = new Date(this.currentWeekStart)
+            d.setDate(d.getDate() - 7)
+            this.currentWeekStart = d
+            this._applyWeek()
+        },
+        nextWeek() {
+            const d = new Date(this.currentWeekStart)
+            d.setDate(d.getDate() + 7)
+            this.currentWeekStart = d
+            this._applyWeek()
+        },
+        goToday() {
+            const today = new Date()
+            const dow = today.getDay()
+            const daysToMon = dow === 0 ? 6 : dow - 1
+            const mon = new Date(today)
+            mon.setDate(today.getDate() - daysToMon)
+            mon.setHours(0, 0, 0, 0)
+            this.currentWeekStart = mon
+            this._applyWeek()
+        },
+        _applyWeek() {
+            const ws = this.currentWeekStart
+            const we = new Date(ws.getTime() + 7 * 86400000)
+            gantt.config.start_date = ws
+            gantt.config.end_date   = we
+            Object.keys(ACTIVITIES).forEach(taskId => {
+                try {
+                    const task = gantt.getTask(taskId)
+                    task.start_date = ws
+                    task.end_date   = we
+                } catch(e) {
+                    console.log(`Task ${taskId} not found when applying week change`)
+                }
+            })
+            gantt.render()
+        }
+    }
+}
+</script>
+
+<style lang="scss" scoped>
+.plan-gantt-wrapper {
+    width: 100%;
+    height: fit-content;
+    max-height: calc(100vh - 64px);
+    display: flex;
+    flex-direction: column;
+}
+
+.plan-gantt-legend {
+    display: flex;
+    gap: 20px;
+    padding: 12px 16px;
+    background: #f5f5f5;
+    border-bottom: 1px solid #ddd;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.plan-gantt-nav {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    padding: 8px 16px;
+    background: #fff;
+    border-bottom: 1px solid #ddd;
+}
+
+.nav-btn {
+    font-size: 1.5em;
+    line-height: 1;
+    padding: 2px 12px;
+    cursor: pointer;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    background: #f0f0f0;
+    &:hover { background: #e0e0e0; }
+
+    &.today-btn {
+        font-size: 1em;
+        padding: 8px 16px;
+        background: #1a6fd4;
+        color: #fff;
+        border-color: #1a6fd4;
+        &:hover { background: #155ab8; border-color: #155ab8; }
+    }
+}
+
+.nav-label {
+    font-size: 0.9375em;
+    font-weight: 600;
+    color: #5a5a5a;
+    min-width: 160px;
+    text-align: center;
+}
+.nav-spacer {
+    flex: 1;
+}
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.8125em;
+}
+
+.legend-swatch {
+    width: 20px;
+    height: 20px;
+    border: 2px solid;
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+
+.legend-label {
+    color: #333;
+    font-weight: 500;
+}
+
+.plan-gantt {
+    width: 100%;
+    height: fit-content;
+    max-height: calc(100vh - 64px);
+    overflow-y: auto;
+    flex: 1;
+}
+
+.hidden-bar { display: none !important; }
+
+/* 資料列文字向右偏移，避免被 vessel overlay 蓋住 */
+.plan-gantt .gantt_grid_data .gantt_row .gantt_cell {
+    padding-left: 52px !important;
+}
+
+/* 表頭：向右偏移並確保左側背景為白色 */
+.plan-gantt .gantt_grid_head_cell {
+    padding: 0 26px !important;
+    background: #fff !important;
+}
+
+.gantt_task_cell.day-start {
+    border-left: 1px solid #888 !important;
+
+/* 跨週裁切指示器 */
+.custom-act-bar.bar-left-clipped {
+    border-left: none;
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    &::before {
+        content: '';
+        position: absolute;
+        left: 0; top: 50%;
+        transform: translateY(-50%);
+        border-top: 6px solid transparent;
+        border-bottom: 6px solid transparent;
+        border-right: 7px solid currentColor;
+        opacity: 0.7;
+        pointer-events: none;
+    }
+}
+
+.custom-act-bar.bar-right-clipped {
+    border-right: none;
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+    &::after {
+        content: '';
+        position: absolute;
+        right: 0; top: 50%;
+        transform: translateY(-50%);
+        border-top: 6px solid transparent;
+        border-bottom: 6px solid transparent;
+        border-left: 7px solid currentColor;
+        opacity: 0.7;
+        pointer-events: none;
+    }
+}
+}
+</style>
