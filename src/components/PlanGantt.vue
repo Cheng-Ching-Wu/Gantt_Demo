@@ -73,12 +73,16 @@
                         <div class="form-row">
                             <label>開始時間</label>
                             <input type="date" v-model="modalForm.startDate" />
-                            <input type="time" v-model="modalForm.startTime" step="1800" />
+                            <select v-model="modalForm.startTime">
+                                <option v-for="t in timeOptions" :key="t" :value="t">{{ t }}</option>
+                            </select>
                         </div>
                         <div class="form-row">
                             <label>結束時間</label>
                             <input type="date" v-model="modalForm.endDate" />
-                            <input type="time" v-model="modalForm.endTime" step="1800" />
+                            <select v-model="modalForm.endTime">
+                                <option v-for="t in timeOptions" :key="t" :value="t">{{ t }}</option>
+                            </select>
                         </div>
                     </div>
                     <div class="modal-footer">
@@ -93,14 +97,16 @@
         <transition name="modal-fade">
             <div v-if="deleteConfirmVisible" class="modal-overlay" @click.self="cancelDelete">
                 <div class="modal-dialog delete-confirm-dialog">
-                    <div class="modal-header">
-                        <span>確認刪除</span>
-                        <button class="modal-close" @click="cancelDelete">✕</button>
-                    </div>
                     <div class="modal-body delete-confirm-body">
-                        <div>確定要刪除以下資料嗎？</div>
-                        <div class="delete-info-line"><strong>項目：</strong>{{ deleteTargetItem }}</div>
-                        <div class="delete-info-line"><strong>起迄：</strong>{{ deleteTargetTimeRange }}</div>
+                        <h3>確定要刪除以下資料嗎？</h3>
+                        <div class="delete-info-line">
+                            <span>項目：</span>
+                            <h3>{{ deleteTargetItem }}</h3>
+                        </div>
+                        <div class="delete-info-line">
+                            <span>起迄：</span>
+                            <h3>{{ deleteTargetTimeRange }}</h3>
+                        </div>
                     </div>
                     <div class="modal-footer">
                         <button class="btn-cancel" @click="cancelDelete">取消</button>
@@ -228,6 +234,8 @@ function assignLanes(acts, draggedAct = null) {
 // 初始化時對所有列執行一次分道
 Object.values(ACTIVITIES).forEach(acts => assignLanes(acts))
 
+const BASE_ROW_H = 35
+
 export default {
     name: 'PlanGantt',
     data() {
@@ -265,13 +273,22 @@ export default {
         this.legendData.forEach(item => {
             window.TYPE_COLORS[item.key] = { color: item.color, border: item.border }
         })
-    },
-    mounted() {
+
+        // ── 初始週範圍計算（不需 DOM，在 created 完成）──
+        const refDate = new Date(2025, 8, 30)
+        const dow = refDate.getDay()
+        const daysToMon = dow === 0 ? 6 : dow - 1
+        const initStart = new Date(refDate)
+        initStart.setDate(refDate.getDate() - daysToMon)
+        initStart.setHours(0, 0, 0, 0)
+        this.currentWeekStart = initStart
+        this.syncYearWeekFromWeekStart()
+
+        // ── Gantt 靜態設定（不需 DOM，init 前設定即可）──
+        const DOW = ['日', '一', '二', '三', '四', '五', '六']
         gantt.config.columns = [
             { name: 'text', label: '項目', width: 112, align: 'center' },
         ]
-
-        const DOW = ['日', '一', '二', '三', '四', '五', '六']
         gantt.config.scales = [
             {
                 unit: 'day', step: 1,
@@ -288,121 +305,24 @@ export default {
                 }
             }
         ]
-        // 計算本週範圍（週一為起點，週日之後 00:00 為終點）
-        const refDate = new Date(2025, 8, 30)
-        const dow = refDate.getDay()
-        const daysToMon = dow === 0 ? 6 : dow - 1
-        const initStart = new Date(refDate)
-        initStart.setDate(refDate.getDate() - daysToMon)
-        initStart.setHours(0, 0, 0, 0)
-        this.currentWeekStart = initStart
-        this.syncYearWeekFromWeekStart()
-
         gantt.config.start_date = this.currentWeekStart
         gantt.config.end_date   = new Date(this.currentWeekStart.getTime() + 7 * 86400000)
         gantt.config.show_progress = false
-        gantt.config.readonly      = true   // 避免 gantt 內建 drag 干擾自訂邏輯
+        gantt.config.readonly      = true
         gantt.config.drag_links    = false
         gantt.config.drag_progress = false
         gantt.config.column_width  = 60
         gantt.config.scale_height  = 70
         gantt.config.autosize      = 'y'
 
-        // 每列基礎高度（區塊保持此高度，列高依分道數倍增）
-        const BASE_ROW_H = gantt.config.row_height || 35
-
-    // 根據目前 ACTIVITIES 重新計算各 task 的 row_height
-        const updateRowHeights = () => {
-            const wsMs = gantt.config.start_date.getTime()
-            const weMs = gantt.config.end_date.getTime()
-
-            // Step 1：先把所有子項重置回 BASE_ROW_H，
-            // 避免「非 ACTIVITIES 的子項」（如 s1_maintenance）上一週被設為 1 後沒機會還原
-            VESSELS.forEach(({ ids }) => {
-                ids.forEach(id => {
-                    try { gantt.getTask(id).row_height = BASE_ROW_H } catch (e) { /* ignore */ }
-                })
-            })
-
-            // Step 2：依當週可見 activities 調整分道較多的子項列高
-            Object.keys(ACTIVITIES).forEach(taskId => {
-                try {
-                    const task = gantt.getTask(taskId)
-                    const visActs = (ACTIVITIES[taskId] || []).filter(a =>
-                        a.end.getTime() > wsMs && a.start.getTime() < weMs
-                    )
-                    const totalLanes = visActs.length
-                        ? Math.max(...visActs.map(a => (a._lane ?? 0)), 0) + 1
-                        : 1
-                    task.row_height = totalLanes * BASE_ROW_H
-                } catch (e) { /* task 尚未存在時忽略 */ }
-            })
-
-            // Step 3：若整艘船該週無資料，所有子項設為 1（非 0 避免 falsy）
-            // 實際視覺隱藏由 onGanttRender 的 CSS class 完成
-            VESSELS.forEach(({ ids }) => {
-                const hasData = ids.some(id =>
-                    (ACTIVITIES[id] || []).some(a =>
-                        a.end.getTime() > wsMs && a.start.getTime() < weMs
-                    )
-                )
-                if (!hasData) {
-                    ids.forEach(id => {
-                        try { gantt.getTask(id).row_height = 1 } catch (e) { /* ignore */ }
-                    })
-                }
-            })
-        }
-
-        // 依畫面上的 y 座標找出所在資料列索引（含動態 row_height）
-        const getTaskIndexAtY = y => {
-            for (let i = 0; i < gantt.getTaskCount(); i++) {
-                const top = gantt.getRowTop(i)
-                const t = gantt.getTaskByIndex(i)
-                const h = (t && t.row_height) || gantt.config.row_height
-                if (y >= top && y < top + h) return i
-            }
-            return -1
-        }
-
-        // 隱藏所有原生 task bar
+        // ── Gantt 模板（純函式賦值，不需 DOM）──
         gantt.templates.task_class = () => 'hidden-bar'
         gantt.templates.task_text  = () => ''
-
-        // 每天分隔線加粗
         gantt.templates.timeline_cell_class = (_t, date) =>
             date.getHours() === 0 ? 'day-start' : ''
-
-        // 格式化時間為 MM/DD HH:mm（提升到 mounted 層級供 hover tooltip 共用）
-        const fmtDt = dt => {
-            const p = n => String(n).padStart(2, '0')
-            return `${p(dt.getMonth()+1)}/${p(dt.getDate())} ${p(dt.getHours())}:${p(dt.getMinutes())}`
-        }
-
-        // 將 tooltip 限制在視窗內，避免超出螢幕
-        const positionTooltip = (tooltipEl, anchorRect, text) => {
-            const pad = 8
-            tooltipEl.innerHTML = text
-            tooltipEl.style.transform = 'none'
-            tooltipEl.style.visibility = 'hidden'
-            tooltipEl.style.display = 'block'
-
-            const t = tooltipEl.getBoundingClientRect()
-            let left = anchorRect.left + anchorRect.width / 2 - t.width / 2
-            left = Math.max(pad, Math.min(left, window.innerWidth - t.width - pad))
-
-            let top = anchorRect.top - t.height - pad
-            if (top < pad) top = anchorRect.bottom + pad
-            if (top + t.height > window.innerHeight - pad) {
-                top = Math.max(pad, window.innerHeight - t.height - pad)
-            }
-
-            tooltipEl.style.left = `${Math.round(left)}px`
-            tooltipEl.style.top = `${Math.round(top)}px`
-            tooltipEl.style.visibility = 'visible'
-        }
-
-        // Hover tooltip（單例，掛在 body，bar render 時附加 listener）
+    },
+    mounted() {
+        // Hover tooltip（需 DOM 存在才建立）
         const hoverTooltip = this._hoverTooltip = document.createElement('div')
         hoverTooltip.style.cssText = `
             position:fixed;
@@ -419,32 +339,8 @@ export default {
         `
         document.body.appendChild(hoverTooltip)
 
-        // 記錄目前 focus 的 activity（跨 re-render 保留狀態）
-        let focusedAct = null
-
-        const applyFocusStyle = barEl => {
-            // mousedown / re-render 當下才抓目前的背景，確保還原值永遠是最新的
-            barEl.dataset.savedBg       = barEl.style.backgroundColor || barEl.style.background || ''
-            barEl.style.outline         = '2px solid #1a6fd4'
-            barEl.style.outlineOffset   = '1px'
-            barEl.style.backgroundColor = 'rgba(26,111,212,0.20)'
-            barEl.style.zIndex          = '7'
-            barEl.dataset.focused       = 'true'  // 確保任何路徑呼叫都能被 setFocus 的查詢找到
-        }
-        const removeFocusStyle = barEl => {
-            barEl.style.outline         = ''
-            barEl.style.outlineOffset   = ''
-            barEl.style.backgroundColor = barEl.dataset.savedBg || ''
-            delete barEl.dataset.savedBg
-            delete barEl.dataset.focused
-            barEl.style.zIndex          = '5'
-        }
-        const setFocus = barEl => {
-            document.querySelectorAll('.custom-act-bar[data-focused]').forEach(b => {
-                removeFocusStyle(b)  // removeFocusStyle 內已刪除 data-focused
-            })
-            if (barEl) applyFocusStyle(barEl)  // applyFocusStyle 內已設定 data-focused
-        }
+        // focus 狀態追蹤（跨 re-render 保留，以 instance property 存放）
+        this._focusedAct = null
 
         // ── 在 onGanttRender 手動繪製多 bar + vessel overlay ──
         gantt.attachEvent('onGanttRender', () => {
@@ -581,7 +477,7 @@ export default {
                     `
                     // 儲存邊框色，re-render 後若此 act 仍被 focus 就還原樣式
                     bar.dataset.borderColor = typeBorder
-                    if (act === focusedAct) applyFocusStyle(bar)
+                    if (act === this._focusedAct) this.applyFocusStyle(bar)
 
                     const labelEl = document.createElement('span')
                     labelEl.textContent = act.label
@@ -639,7 +535,7 @@ export default {
                     // ── Hover tooltip ──
                     bar.addEventListener('mouseenter', () => {
                         const r = bar.getBoundingClientRect()
-                        positionTooltip(hoverTooltip, r, `項目: ${legendItem?.label ?? actType}  ${act.label}\n${fmtDt(act.start)} ~ ${fmtDt(act.end)}`)
+                        this.positionTooltip(hoverTooltip, r, `項目: ${legendItem?.label ?? actType}  ${act.label}\n${this.fmtDt(act.start)} ~ ${this.fmtDt(act.end)}`)
                     })
                     bar.addEventListener('mouseleave', () => {
                         hoverTooltip.style.display = 'none'
@@ -661,8 +557,8 @@ export default {
                             el.setPointerCapture(e.pointerId)
                             // 設定 focus，同時隱藏 hover tooltip（drag tooltip 接管）
                             hoverTooltip.style.display = 'none'
-                            focusedAct = act
-                            setFocus(bar)
+                            this._focusedAct = act
+                            this.setFocus(bar)
 
                             const startX    = e.clientX
                             const startY    = e.clientY
@@ -760,7 +656,7 @@ export default {
 
                                 // 使用 bar 的 viewport 座標定位（position:fixed）
                                 const barRect = bar.getBoundingClientRect()
-                                positionTooltip(tooltip, barRect, `項目: ${legendItem?.label ?? actType}  ${act.label}\n${fmtDt(newStart)} ~ ${fmtDt(newEnd)}`)
+                                this.positionTooltip(tooltip, barRect, `項目: ${legendItem?.label ?? actType}  ${act.label}\n${this.fmtDt(newStart)} ~ ${this.fmtDt(newEnd)}`)
                             }
 
                             const onMove = ev => {
@@ -835,7 +731,7 @@ export default {
                                         // 足夠垂直位移，嘗試跨列
                                         const tentativeTop = startTop + currentDy
                                         const centerY = tentativeTop + (BASE_ROW_H - 8) / 2
-                                        targetIdx = getTaskIndexAtY(centerY)
+                                        targetIdx = this.getTaskIndexAtY(centerY)
                                         if (targetIdx === -1) {
                                             let closestIdx = idx, closestDist = Infinity
                                             for (let i = 0; i < gantt.getTaskCount(); i++) {
@@ -864,21 +760,21 @@ export default {
                                         // 同列：act 排最後，非拖曳 bar 優先保留位置
                                         assignLanes(ACTIVITIES[taskId], act)
                                     }
-                                    updateRowHeights()
+                                    this.updateRowHeights()
                                     gantt.render()
                                 } else if (type === 'resize-right') {
                                     act.end = isRightClipped
                                         ? new Date(snapMs(origEnd.getTime() + (finalW - startW) * msPerPx))
                                         : new Date(snapMs(timelineStart + (finalLeft + finalW) * msPerPx))
                                     assignLanes(ACTIVITIES[taskId], act)
-                                    updateRowHeights()
+                                    this.updateRowHeights()
                                     gantt.render()
                                 } else if (type === 'resize-left') {
                                     act.start = isLeftClipped
                                         ? new Date(snapMs(origStart.getTime() + finalLeft * msPerPx))
                                         : new Date(snapMs(timelineStart + finalLeft * msPerPx))
                                     assignLanes(ACTIVITIES[taskId], act)
-                                    updateRowHeights()
+                                    this.updateRowHeights()
                                     gantt.render()
                                 }
 
@@ -946,12 +842,9 @@ export default {
             links: []
         })
 
-        // parse 後再同步一次列高，確保 grid 與 timeline 都套用到最新 row_height
-        updateRowHeights()
+        // parse 後同步一次列高，確保 grid 與 timeline 都套用到最新 row_height
+        this.updateRowHeights()
         gantt.render()
-
-        // 暴露給 methods（_applyWeek 切週時需要重算列高）
-        this._updateRowHeights = updateRowHeights
 
         // ── 拖拉平移時間軸（點擊空白區域才啟動）──
         let lastX = 0, lastY = 0
@@ -961,8 +854,8 @@ export default {
             // 若點擊的是 bar 或縮放把手，不啟動 pan
             if (e.target.closest('.custom-act-bar')) return
             // 點擊空白區域，清除 focus
-            focusedAct = null
-            setFocus(null)
+            this._focusedAct = null
+            this.setFocus(null)
             container.setPointerCapture(e.pointerId)
             lastX = e.clientX
             lastY = e.clientY
@@ -990,6 +883,14 @@ export default {
         if (this._hoverTooltip?.parentNode) this._hoverTooltip.parentNode.removeChild(this._hoverTooltip)
     },
     computed: {
+        timeOptions() {
+            const opts = []
+            for (let h = 0; h < 24; h++) {
+                opts.push(`${String(h).padStart(2,'0')}:00`)
+                opts.push(`${String(h).padStart(2,'0')}:30`)
+            }
+            return opts
+        },
         yearOptions() {
             const base = this.currentWeekStart ? this.currentWeekStart.getFullYear() : new Date().getFullYear()
             return [base - 2, base - 1, base, base + 1, base + 2]
@@ -1040,6 +941,93 @@ export default {
         }
     },
     methods: {
+        // ── 工具方法（從 mounted 閃住優抽出）──
+        fmtDt(dt) {
+            const p = n => String(n).padStart(2, '0')
+            return `${p(dt.getMonth()+1)}/${p(dt.getDate())} ${p(dt.getHours())}:${p(dt.getMinutes())}`
+        },
+        positionTooltip(tooltipEl, anchorRect, text) {
+            const pad = 8
+            tooltipEl.innerHTML = text
+            tooltipEl.style.transform = 'none'
+            tooltipEl.style.visibility = 'hidden'
+            tooltipEl.style.display = 'block'
+            const t = tooltipEl.getBoundingClientRect()
+            let left = anchorRect.left + anchorRect.width / 2 - t.width / 2
+            left = Math.max(pad, Math.min(left, window.innerWidth - t.width - pad))
+            let top = anchorRect.top - t.height - pad
+            if (top < pad) top = anchorRect.bottom + pad
+            if (top + t.height > window.innerHeight - pad) {
+                top = Math.max(pad, window.innerHeight - t.height - pad)
+            }
+            tooltipEl.style.left = `${Math.round(left)}px`
+            tooltipEl.style.top = `${Math.round(top)}px`
+            tooltipEl.style.visibility = 'visible'
+        },
+        applyFocusStyle(barEl) {
+            barEl.dataset.savedBg       = barEl.style.backgroundColor || barEl.style.background || ''
+            barEl.style.outline         = '2px solid #1a6fd4'
+            barEl.style.outlineOffset   = '1px'
+            barEl.style.backgroundColor = 'rgba(26,111,212,0.20)'
+            barEl.style.zIndex          = '7'
+            barEl.dataset.focused       = 'true'
+        },
+        removeFocusStyle(barEl) {
+            barEl.style.outline         = ''
+            barEl.style.outlineOffset   = ''
+            barEl.style.backgroundColor = barEl.dataset.savedBg || ''
+            delete barEl.dataset.savedBg
+            delete barEl.dataset.focused
+            barEl.style.zIndex          = '5'
+        },
+        setFocus(barEl) {
+            document.querySelectorAll('.custom-act-bar[data-focused]').forEach(b => {
+                this.removeFocusStyle(b)
+            })
+            if (barEl) this.applyFocusStyle(barEl)
+        },
+        updateRowHeights() {
+            const wsMs = gantt.config.start_date.getTime()
+            const weMs = gantt.config.end_date.getTime()
+            VESSELS.forEach(({ ids }) => {
+                ids.forEach(id => {
+                    try { gantt.getTask(id).row_height = BASE_ROW_H } catch (e) { /* ignore */ }
+                })
+            })
+            Object.keys(ACTIVITIES).forEach(taskId => {
+                try {
+                    const task = gantt.getTask(taskId)
+                    const visActs = (ACTIVITIES[taskId] || []).filter(a =>
+                        a.end.getTime() > wsMs && a.start.getTime() < weMs
+                    )
+                    const totalLanes = visActs.length
+                        ? Math.max(...visActs.map(a => (a._lane ?? 0)), 0) + 1
+                        : 1
+                    task.row_height = totalLanes * BASE_ROW_H
+                } catch (e) { /* task 尚未存在時忽略 */ }
+            })
+            VESSELS.forEach(({ ids }) => {
+                const hasData = ids.some(id =>
+                    (ACTIVITIES[id] || []).some(a =>
+                        a.end.getTime() > wsMs && a.start.getTime() < weMs
+                    )
+                )
+                if (!hasData) {
+                    ids.forEach(id => {
+                        try { gantt.getTask(id).row_height = 1 } catch (e) { /* ignore */ }
+                    })
+                }
+            })
+        },
+        getTaskIndexAtY(y) {
+            for (let i = 0; i < gantt.getTaskCount(); i++) {
+                const top = gantt.getRowTop(i)
+                const t = gantt.getTaskByIndex(i)
+                const h = (t && t.row_height) || gantt.config.row_height
+                if (y >= top && y < top + h) return i
+            }
+            return -1
+        },
         getISOWeekInfo(date) {
             const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()))
             const dayNum = d.getUTCDay() || 7
@@ -1115,7 +1103,7 @@ export default {
                 }
             })
             // 切週後重算列高，避免保留上一週多分道撐高的 row_height
-            if (this._updateRowHeights) this._updateRowHeights()
+            this.updateRowHeights()
             gantt.render()
         },
         openAddModal() {
@@ -1137,9 +1125,9 @@ export default {
                 vessel, type,
                 label:     act.label,
                 startDate: `${act.start.getFullYear()}-${pad(act.start.getMonth()+1)}-${pad(act.start.getDate())}`,
-                startTime: `${pad(act.start.getHours())}:${pad(act.start.getMinutes())}`,
+                startTime: `${pad(act.start.getHours())}:${act.start.getMinutes() < 30 ? '00' : '30'}`,
                 endDate:   `${act.end.getFullYear()}-${pad(act.end.getMonth()+1)}-${pad(act.end.getDate())}`,
-                endTime:   `${pad(act.end.getHours())}:${pad(act.end.getMinutes())}`,
+                endTime:   `${pad(act.end.getHours())}:${act.end.getMinutes() < 30 ? '00' : '30'}`,
             }
             this.modalVisible = true
         },
@@ -1178,7 +1166,7 @@ export default {
                     assignLanes(ACTIVITIES[newTaskId], act)
                 }
             }
-            if (this._updateRowHeights) this._updateRowHeights()
+            this.updateRowHeights()
             gantt.render()
             this.closeModal()
         },
@@ -1210,7 +1198,7 @@ export default {
             const arr = ACTIVITIES[taskId]
             if (arr) { const i = arr.indexOf(act); if (i !== -1) arr.splice(i, 1) }
             if (ACTIVITIES[taskId]?.length) assignLanes(ACTIVITIES[taskId])
-            if (this._updateRowHeights) this._updateRowHeights()
+            this.updateRowHeights()
             gantt.render()
         },
     }
