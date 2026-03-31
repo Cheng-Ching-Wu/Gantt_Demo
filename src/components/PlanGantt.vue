@@ -16,7 +16,12 @@
             <span style="font-size: 0.875em; align-self: end;">單位時間: 30 分鐘</span>
             <div class="nav-spacer"></div>
             <a role="button" class="nav-btn" @click="prevWeek">&#8249;</a>
-            <span class="nav-label">{{ weekLabel }}</span>
+            <select class="nav-select" v-model.number="selectedYear" @change="onYearWeekChange">
+                <option v-for="y in yearOptions" :key="y" :value="y">{{ y }} 年</option>
+            </select>
+            <select class="nav-select" v-model.number="selectedWeek" @change="onYearWeekChange">
+                <option v-for="w in weekOptions" :key="w" :value="w">第 {{ w }} 週</option>
+            </select>
             <a role="button" class="nav-btn" @click="nextWeek">&#8250;</a>
             <div class="nav-spacer"></div>
             <a role="button" class="nav-btn today-btn" @click="goToday">今天</a>
@@ -33,54 +38,77 @@
             <div class="context-menu-item" @click="openEditModal(contextMenu.act, contextMenu.taskId); hideContextMenu()">
                 ✎ 編輯
             </div>
-            <div class="context-menu-item context-menu-item--danger" @click="deleteAct(contextMenu.act, contextMenu.taskId); hideContextMenu()">
+            <div class="context-menu-item context-menu-item--danger" @click="requestDelete(contextMenu.act, contextMenu.taskId); hideContextMenu()">
                 🗑 刪除
             </div>
         </div>
 
         <!-- 新增 / 編輯彈窗 -->
-        <div v-if="modalVisible" class="modal-overlay" @click.self="closeModal">
-            <div class="modal-dialog">
-                <div class="modal-header">
-                    <span>{{ modalMode === 'add' ? '新增項目' : '編輯項目' }}</span>
-                    <button class="modal-close" @click="closeModal">✕</button>
-                </div>
-                <div class="modal-body">
-                    <div class="form-row">
-                        <label>船隻</label>
-                        <select v-model="modalForm.vessel" @change="modalForm.type = ''">
-                            <option value="">請選擇</option>
-                            <option v-for="v in vesselOptions" :key="v.prefix" :value="v.prefix">{{ v.name }}</option>
-                        </select>
+        <transition name="modal-fade">
+            <div v-if="modalVisible" class="modal-overlay" @click.self="closeModal">
+                <div class="modal-dialog">
+                    <div class="modal-header">
+                        <span>{{ modalMode === 'add' ? '新增項目' : '編輯項目' }}</span>
+                        <button class="modal-close" @click="closeModal">✕</button>
                     </div>
-                    <div class="form-row">
-                        <label>項目類型</label>
-                        <select v-model="modalForm.type" :disabled="!modalForm.vessel">
-                            <option value="">請選擇</option>
-                            <option v-for="t in availableTypes" :key="t.key" :value="t.key">{{ t.label }}</option>
-                        </select>
+                    <div class="modal-body">
+                        <div class="form-row">
+                            <label>船隻</label>
+                            <select v-model="modalForm.vessel" @change="modalForm.type = ''">
+                                <option value="">請選擇</option>
+                                <option v-for="v in vesselOptions" :key="v.prefix" :value="v.prefix">{{ v.name }}</option>
+                            </select>
+                        </div>
+                        <div class="form-row">
+                            <label>項目類型</label>
+                            <select v-model="modalForm.type" :disabled="!modalForm.vessel">
+                                <option value="">請選擇</option>
+                                <option v-for="t in availableTypes" :key="t.key" :value="t.key">{{ t.label }}</option>
+                            </select>
+                        </div>
+                        <div class="form-row">
+                            <label>標籤</label>
+                            <input type="text" v-model="modalForm.label" placeholder="請輸入標籤" />
+                        </div>
+                        <div class="form-row">
+                            <label>開始時間</label>
+                            <input type="date" v-model="modalForm.startDate" />
+                            <input type="time" v-model="modalForm.startTime" step="1800" />
+                        </div>
+                        <div class="form-row">
+                            <label>結束時間</label>
+                            <input type="date" v-model="modalForm.endDate" />
+                            <input type="time" v-model="modalForm.endTime" step="1800" />
+                        </div>
                     </div>
-                    <div class="form-row">
-                        <label>標籤</label>
-                        <input type="text" v-model="modalForm.label" placeholder="請輸入標籤" />
+                    <div class="modal-footer">
+                        <button class="btn-cancel" @click="closeModal">取消</button>
+                        <button class="btn-save" @click="saveModal">儲存</button>
                     </div>
-                    <div class="form-row">
-                        <label>開始時間</label>
-                        <input type="date" v-model="modalForm.startDate" />
-                        <input type="time" v-model="modalForm.startTime" step="1800" />
-                    </div>
-                    <div class="form-row">
-                        <label>結束時間</label>
-                        <input type="date" v-model="modalForm.endDate" />
-                        <input type="time" v-model="modalForm.endTime" step="1800" />
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button class="btn-cancel" @click="closeModal">取消</button>
-                    <button class="btn-save" @click="saveModal">儲存</button>
                 </div>
             </div>
-        </div>
+        </transition>
+
+        <!-- 刪除確認彈窗 -->
+        <transition name="modal-fade">
+            <div v-if="deleteConfirmVisible" class="modal-overlay" @click.self="cancelDelete">
+                <div class="modal-dialog delete-confirm-dialog">
+                    <div class="modal-header">
+                        <span>確認刪除</span>
+                        <button class="modal-close" @click="cancelDelete">✕</button>
+                    </div>
+                    <div class="modal-body delete-confirm-body">
+                        <div>確定要刪除以下資料嗎？</div>
+                        <div class="delete-info-line"><strong>項目：</strong>{{ deleteTargetItem }}</div>
+                        <div class="delete-info-line"><strong>起迄：</strong>{{ deleteTargetTimeRange }}</div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn-cancel" @click="cancelDelete">取消</button>
+                        <button class="btn-danger" @click="confirmDelete">確認刪除</button>
+                    </div>
+                </div>
+            </div>
+        </transition>
     </div>
 </template>
 
@@ -205,6 +233,8 @@ export default {
     data() {
         return {
             currentWeekStart: null,
+            selectedYear: new Date().getFullYear(),
+            selectedWeek: 1,
             modalVisible: false,
             modalMode: 'add',
             modalForm: {
@@ -215,6 +245,9 @@ export default {
             editTaskId: null,
             editAct: null,
             contextMenu: { visible: false, x: 0, y: 0, act: null, taskId: null },
+            deleteConfirmVisible: false,
+            pendingDeleteAct: null,
+            pendingDeleteTaskId: null,
             legendData: [
                 { key: 'bunkering', label: '補油', color: 'rgba(0,155,255,0.30)', border: '#009bff' },
                 { key: 'transfer', label: '駁油', color: 'rgba(178,71,255,0.30)', border: '#b247ff' },
@@ -263,6 +296,7 @@ export default {
         initStart.setDate(refDate.getDate() - daysToMon)
         initStart.setHours(0, 0, 0, 0)
         this.currentWeekStart = initStart
+        this.syncYearWeekFromWeekStart()
 
         gantt.config.start_date = this.currentWeekStart
         gantt.config.end_date   = new Date(this.currentWeekStart.getTime() + 7 * 86400000)
@@ -956,6 +990,14 @@ export default {
         if (this._hoverTooltip?.parentNode) this._hoverTooltip.parentNode.removeChild(this._hoverTooltip)
     },
     computed: {
+        yearOptions() {
+            const base = this.currentWeekStart ? this.currentWeekStart.getFullYear() : new Date().getFullYear()
+            return [base - 2, base - 1, base, base + 1, base + 2]
+        },
+        weekOptions() {
+            const total = this.getISOWeeksInYear(this.selectedYear)
+            return Array.from({ length: total }, (_, i) => i + 1)
+        },
         vesselOptions() {
             return [
                 { prefix: 's1', name: '油駁船1', types: ['bunkering','transfer','maintenance','breakdown','other'] },
@@ -971,6 +1013,22 @@ export default {
                 label: this.legendData.find(l => l.key === key)?.label ?? key
             }))
         },
+        deleteTargetLabel() {
+            return this.pendingDeleteAct ? this.pendingDeleteAct.label : ''
+        },
+        deleteTargetItem() {
+            if (!this.pendingDeleteTaskId || !this.pendingDeleteAct) return ''
+            const m = this.pendingDeleteTaskId.match(/^s\d+_(.+)$/)
+            const typeKey = m ? m[1] : ''
+            const typeLabel = this.legendData.find(l => l.key === typeKey)?.label ?? typeKey
+            return `${typeLabel} ${this.pendingDeleteAct.label}`.trim()
+        },
+        deleteTargetTimeRange() {
+            if (!this.pendingDeleteAct) return ''
+            const pad = n => String(n).padStart(2, '0')
+            const fmt = dt => `${dt.getFullYear()}/${pad(dt.getMonth() + 1)}/${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}`
+            return `${fmt(this.pendingDeleteAct.start)} ~ ${fmt(this.pendingDeleteAct.end)}`
+        },
         weekLabel() {
             if (!this.currentWeekStart) return ''
             // ISO 週數計算
@@ -982,16 +1040,53 @@ export default {
         }
     },
     methods: {
+        getISOWeekInfo(date) {
+            const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()))
+            const dayNum = d.getUTCDay() || 7
+            d.setUTCDate(d.getUTCDate() + 4 - dayNum)
+            const isoYear = d.getUTCFullYear()
+            const yearStart = new Date(Date.UTC(isoYear, 0, 1))
+            const week = Math.ceil((((d - yearStart) / 86400000) + 1) / 7)
+            return { year: isoYear, week }
+        },
+        getISOWeeksInYear(year) {
+            return this.getISOWeekInfo(new Date(Date.UTC(year, 11, 28))).week
+        },
+        getISOWeekStart(year, week) {
+            const jan4 = new Date(year, 0, 4)
+            const jan4Day = jan4.getDay() || 7
+            const mondayWeek1 = new Date(jan4)
+            mondayWeek1.setDate(jan4.getDate() - jan4Day + 1)
+            mondayWeek1.setHours(0, 0, 0, 0)
+            const start = new Date(mondayWeek1)
+            start.setDate(mondayWeek1.getDate() + (week - 1) * 7)
+            return start
+        },
+        syncYearWeekFromWeekStart() {
+            if (!this.currentWeekStart) return
+            const info = this.getISOWeekInfo(this.currentWeekStart)
+            this.selectedYear = info.year
+            this.selectedWeek = info.week
+        },
+        onYearWeekChange() {
+            const total = this.getISOWeeksInYear(this.selectedYear)
+            if (this.selectedWeek > total) this.selectedWeek = total
+            if (this.selectedWeek < 1) this.selectedWeek = 1
+            this.currentWeekStart = this.getISOWeekStart(this.selectedYear, this.selectedWeek)
+            this._applyWeek()
+        },
         prevWeek() {
             const d = new Date(this.currentWeekStart)
             d.setDate(d.getDate() - 7)
             this.currentWeekStart = d
+            this.syncYearWeekFromWeekStart()
             this._applyWeek()
         },
         nextWeek() {
             const d = new Date(this.currentWeekStart)
             d.setDate(d.getDate() + 7)
             this.currentWeekStart = d
+            this.syncYearWeekFromWeekStart()
             this._applyWeek()
         },
         goToday() {
@@ -1002,6 +1097,7 @@ export default {
             mon.setDate(today.getDate() - daysToMon)
             mon.setHours(0, 0, 0, 0)
             this.currentWeekStart = mon
+            this.syncYearWeekFromWeekStart()
             this._applyWeek()
         },
         _applyWeek() {
@@ -1092,6 +1188,24 @@ export default {
         hideContextMenu() {
             this.contextMenu.visible = false
         },
+        requestDelete(act, taskId) {
+            this.pendingDeleteAct = act
+            this.pendingDeleteTaskId = taskId
+            this.deleteConfirmVisible = true
+        },
+        cancelDelete() {
+            this.deleteConfirmVisible = false
+            this.pendingDeleteAct = null
+            this.pendingDeleteTaskId = null
+        },
+        confirmDelete() {
+            if (!this.pendingDeleteAct || !this.pendingDeleteTaskId) {
+                this.cancelDelete()
+                return
+            }
+            this.deleteAct(this.pendingDeleteAct, this.pendingDeleteTaskId)
+            this.cancelDelete()
+        },
         deleteAct(act, taskId) {
             const arr = ACTIVITIES[taskId]
             if (arr) { const i = arr.indexOf(act); if (i !== -1) arr.splice(i, 1) }
@@ -1159,6 +1273,17 @@ export default {
     min-width: 160px;
     text-align: center;
 }
+
+.nav-select {
+    height: 34px;
+    padding: 0 10px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    background: #fff;
+    color: #333;
+    font-size: 0.9em;
+}
+
 .nav-spacer {
     flex: 1;
 }
@@ -1278,6 +1403,28 @@ export default {
     align-items: center;
     justify-content: center;
 }
+
+.modal-fade-enter-active,
+.modal-fade-leave-active {
+    transition: opacity 0.2s ease;
+}
+
+.modal-fade-enter,
+.modal-fade-leave-to {
+    opacity: 0;
+}
+
+.modal-fade-enter-active .modal-dialog,
+.modal-fade-leave-active .modal-dialog {
+    transition: transform 0.22s ease, opacity 0.22s ease;
+}
+
+.modal-fade-enter .modal-dialog,
+.modal-fade-leave-to .modal-dialog {
+    transform: translateY(10px) scale(0.98);
+    opacity: 0;
+}
+
 .modal-dialog {
     background: #fff;
     border-radius: 10px;
@@ -1362,6 +1509,28 @@ export default {
     font-size: 0.9em;
     font-weight: 600;
     &:hover { background: #155ab8; }
+}
+.delete-confirm-dialog {
+    width: 360px;
+}
+.delete-confirm-body {
+    font-size: 0.95em;
+    color: #333;
+}
+.delete-info-line {
+    margin-top: 8px;
+    line-height: 1.5;
+}
+.btn-danger {
+    padding: 7px 22px;
+    border: none;
+    border-radius: 5px;
+    background: #c0392b;
+    color: #fff;
+    cursor: pointer;
+    font-size: 0.9em;
+    font-weight: 600;
+    &:hover { background: #a93226; }
 }
 .add-btn {
     font-size: 0.95em !important;
