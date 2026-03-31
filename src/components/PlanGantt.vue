@@ -1235,6 +1235,9 @@ export default {
 }
 
 .nav-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     font-size: 1.5em;
     line-height: 1;
     padding: 2px 12px;
@@ -1245,8 +1248,9 @@ export default {
     &:hover { background: #e0e0e0; }
 
     &.today-btn {
-        font-size: 1em;
-        padding: 8px 16px;
+        font-size: 0.95em;
+        height: 34px;
+        padding: 0 16px;
         background: #1a6fd4;
         color: #fff;
         border-color: #1a6fd4;
@@ -1522,7 +1526,8 @@ export default {
 }
 .add-btn {
     font-size: 0.95em !important;
-    padding: 7px 16px !important;
+    height: 34px !important;
+    padding: 0 16px !important;
     background: #179b0b !important;
     color: #fff !important;
     border-color: #179b0b !important;
