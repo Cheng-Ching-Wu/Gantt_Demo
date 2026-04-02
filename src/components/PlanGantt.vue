@@ -13,7 +13,7 @@
             </div>
         </div>
         <div class="plan-gantt-nav">
-            <span style="font-size: 0.875em; align-self: end;">單位時間: {{ timeIntervalHours }} 小時/格 ｜ 拖曳最小單位: {{ dragSnapMinutes }} 分鐘</span>
+            <span class="nav-timeinterval">單位時間: {{ timeIntervalHours }} 小時/格 ｜ 拖曳最小單位: {{ dragSnapMinutes }} 分鐘</span>
             <div class="nav-spacer"></div>
             <a role="button" class="nav-btn" @click="prevWeek">&#8249;</a>
             <select class="nav-select" v-model.number="selectedYear" @change="onYearWeekChange">
@@ -1356,6 +1356,12 @@ export default {
 .nav-spacer {
     flex: 1;
 }
+
+.nav-timeinterval {
+    font-size: 0.875em;
+    align-self: end;
+}
+
 .legend-item {
     display: flex;
     align-items: center;
@@ -1395,8 +1401,13 @@ export default {
 }
 
 /* 資料列文字向右偏移，避免被 vessel overlay 蓋住 */
-.plan-gantt .gantt_grid_data .gantt_row .gantt_cell {
-    padding-left: 52px !important;
+:deep(.plan-gantt .gantt_grid_data .gantt_row .gantt_cell) {
+    padding-left: 0 !important;
+}
+
+/* 只偏移文字內容，保留 dhtmlx 原生 tree/子項目縮排 */
+:deep(.plan-gantt .gantt_grid_data .gantt_row .gantt_cell .gantt_tree_content) {
+    margin-left: 52px;
 }
 
 /* 表頭：向右偏移並確保左側背景為白色 */

@@ -1,6 +1,7 @@
 <template>
     <div class="dhtmlx-gantt-wrapper">
         <div class="plan-gantt-nav">
+            <span class="nav-timeinterval">單位時間: {{ timeIntervalHours }} 小時/格</span>
             <div class="nav-spacer"></div>
             <a role="button" class="nav-btn" @click="prevWeek">&#8249;</a>
             <select class="nav-select" v-model.number="selectedYear" @change="onYearWeekChange">
@@ -554,6 +555,11 @@ export default {
         border-color: #179b0b !important;
         &:hover { background: #188d0d !important; border-color: #188d0d !important; }
     }
+}
+
+.nav-timeinterval {
+    font-size: 0.875em;
+    align-self: end;
 }
 
 .nav-select {
